@@ -58,7 +58,7 @@ async def soil_chosen(message: types.Message, state: FSMContext):
     await state.update_data(soil_type=message.text)
     await message.answer(
         f"Вы выбрали: {message.text}\n"
-        "Теперь введите пористость грунта (число от 0.45 до 0.65):",
+        "Теперь введите пористость грунта:",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.set_state(Form.entering_porosity)
