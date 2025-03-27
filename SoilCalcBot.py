@@ -75,8 +75,8 @@ async def incorrect_soil(message: types.Message):
 async def calculate_params(message: types.Message, state: FSMContext):
     try:
         pore = float(message.text)
-        if pore < 0.45 or pore > 0.65:
-            await message.answer("Пористость должна быть в диапазоне от 0.45 до 0.65. Попробуйте снова:")
+        if pore < 0 or pore > 1:
+            await message.answer("Пористость должна быть в диапазоне от 0 до 1. Попробуйте снова:")
             return
 
         user_data = await state.get_data()
@@ -109,7 +109,7 @@ async def calculate_params(message: types.Message, state: FSMContext):
         await state.set_state(Form.choosing_soil)
 
     except ValueError:
-        await message.answer("Пожалуйста, введите число от 0.45 до 0.65:")
+        await message.answer("Пожалуйста, введите число:")
 
 
 # Обработка команды отмены
