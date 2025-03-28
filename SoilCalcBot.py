@@ -163,7 +163,7 @@ async def calculate_params(message: types.Message, state: FSMContext):
             result_text,
             reply_markup=builder.as_markup(resize_keyboard=True)
         )
-        await state.set_state(Form.choosing_soil)
+        await state.set_state(Form.choosing_sand)
 
     except ValueError:
         await message.answer("Пожалуйста, введите число:")
