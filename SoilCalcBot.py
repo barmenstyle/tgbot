@@ -122,7 +122,7 @@ async def sand_chosen(message: types.Message, state: FSMContext):
 
 
 # Обработка некорректного выбора типа грунта
-@dp.message(Form.choosing_soil)
+@dp.message(Form.choosing_sand)
 async def incorrect_soil(message: types.Message):
     await message.answer("Пожалуйста, выберите тип грунта из предложенных вариантов.")
 
