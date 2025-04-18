@@ -76,6 +76,7 @@ class Form(StatesGroup):
     choosing_sand = State()
     choosing_clay = State()
     choosing_clay_strength = State()
+    choosing_fluidity_range = State()  # Исправлено название
     entering_porosity_sand = State()
     entering_porosity_clay = State()
 
@@ -187,7 +188,7 @@ async def handle_about(message: types.Message):
     await message.answer(
         "Этот бот помогает рассчитывать параметры грунта.\n"
         "Разработано для инженерно-геологических изысканий.\n"
-        "@barmenstyle ver.0.2"
+        "@barmenstyle ver.0.3s"
     )
 
 
@@ -239,13 +240,6 @@ async def back_to_menu_from_clay(message: types.Message, state: FSMContext):
     )
 
 
-@dp.message(Form.choosing_clay, F.text == "Прочностные c, ф")
-async def clay_strength_chosen(message: types.Message, state: FSMContext):
-    await state.set_state(Form.choosing_clay_strength)
-    await message.answer(
-        "Выберите тип глины:",
-        reply_markup=Keyboards.build_clay_strength_types()
-    )
 
 
 # Новое состояние для выбора показателя текучести
@@ -299,7 +293,6 @@ async def back_to_clay_types_from_fluidity(message: types.Message, state: FSMCon
         "Выберите тип глины:",
         reply_markup=Keyboards.build_clay_strength_types()
     )
-
 
 # Обновленный расчет для глин
 @dp.message(Form.entering_porosity_clay)
