@@ -36,7 +36,6 @@ class SoilConstants:
     POROSITY_CLAY_MAX = 1.05
 
 
-# Данные по грунтам вынесены в отдельный модуль
 class SoilData:
     SAND_TYPES = {
         "Гравелистые и крупные": ((2, 1), (43, 38), (50, 40)),
@@ -50,10 +49,22 @@ class SoilData:
         "Деформационные": "CLAY_DEFORMATION"
     }
 
+    # Обновленные параметры для глин с учетом показателя текучести
     CLAY_STRENGTH_PARAMS = {
-        "Суглинки": ((31, 25), (24, 23)),
-        "Супеси": ((15, 13), (27, 24)),
-        "Глины": ((68, 54), (20, 19))
+        "Суглинки": {
+            "0 ≤ I ≤ 0.25": ((31, 25), (24, 23)),
+            "0.25 < I ≤ 0.5": ((28, 23), (22, 21)),
+            "0.5 < I ≤ 0.75": ((25, 20), (19, 18))
+        },
+        "Супеси": {
+            "0 ≤ I ≤ 0.25": ((15, 13), (27, 24)),
+            "0.25 < I ≤ 0.75": ((13, 11), (24, 21))
+        },
+        "Глины": {
+            "0 ≤ I ≤ 0.25": ((68, 54), (20, 19)),
+            "0.25 < I ≤ 0.5": ((57, 50), (18, 17)),
+            "0.5 < I ≤ 0.75": ((45, 41), (15, 14))
+        }
     }
 
     MAIN_MENU_OPTIONS = {"Пески", "Глины", "О боте"}
@@ -105,6 +116,16 @@ class Keyboards:
         builder.add(types.KeyboardButton(text="Назад"))
         builder.adjust(2)
         return builder.as_markup(resize_keyboard=True)
+
+    @staticmethod
+    def build_fluidity_ranges(clay_type: str):
+        builder = ReplyKeyboardBuilder()
+        for fluidity_range in SoilData.CLAY_STRENGTH_PARAMS[clay_type]:
+            builder.add(types.KeyboardButton(text=fluidity_range))
+        builder.add(types.KeyboardButton(text="Назад"))
+        builder.adjust(1)
+        return builder.as_markup(resize_keyboard=True)
+
 
 
 # Валидация ввода
@@ -218,26 +239,105 @@ async def back_to_menu_from_clay(message: types.Message, state: FSMContext):
     )
 
 
-# Обработка выбора типа глины для прочностных характеристик
+@dp.message(Form.choosing_clay, F.text == "Прочностные c, ф")
+async def clay_strength_chosen(message: types.Message, state: FSMContext):
+    await state.set_state(Form.choosing_clay_strength)
+    await message.answer(
+        "Выберите тип глины:",
+        reply_markup=Keyboards.build_clay_strength_types()
+    )
+
+
+# Новое состояние для выбора показателя текучести
+class Form(StatesGroup):
+    main_menu = State()
+    choosing_sand = State()
+    choosing_clay = State()
+    choosing_clay_strength = State()
+    choosing_fluidity_range = State()  # Новое состояние
+    entering_porosity_sand = State()
+    entering_porosity_clay = State()
+
+
+# Обработчик выбора типа глины
 @dp.message(Form.choosing_clay_strength, F.text.in_(SoilData.CLAY_STRENGTH_PARAMS))
 async def clay_strength_type_chosen(message: types.Message, state: FSMContext):
     await state.update_data(clay_type=message.text)
-    await state.set_state(Form.entering_porosity_clay)
+    await state.set_state(Form.choosing_fluidity_range)
     await message.answer(
         f"Вы выбрали: {message.text}\n"
+        "Выберите показатель текучести (I):",
+        reply_markup=Keyboards.build_fluidity_ranges(message.text)
+    )
+
+
+# Обработчик выбора показателя текучести
+@dp.message(Form.choosing_fluidity_range, F.text.in_({
+    "0 ≤ I ≤ 0.25", "0.25 < I ≤ 0.5", "0.5 < I ≤ 0.75", "0.25 < I ≤ 0.75"
+}))
+async def fluidity_range_chosen(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    clay_type = data['clay_type']
+    fluidity_range = message.text
+
+    # Сохраняем выбранный диапазон текучести
+    await state.update_data(fluidity_range=fluidity_range)
+
+    await state.set_state(Form.entering_porosity_clay)
+    await message.answer(
+        f"Вы выбрали: {clay_type}, {fluidity_range}\n"
         "Введите пористость грунта (от 0 до 1.05):",
         reply_markup=types.ReplyKeyboardRemove()
     )
 
 
-@dp.message(Form.choosing_clay_strength, F.text == "Назад")
-async def back_to_clay_types(message: types.Message, state: FSMContext):
-    await state.set_state(Form.choosing_clay)
+# Возврат к выбору типа глины
+@dp.message(Form.choosing_fluidity_range, F.text == "Назад")
+async def back_to_clay_types_from_fluidity(message: types.Message, state: FSMContext):
+    await state.set_state(Form.choosing_clay_strength)
     await message.answer(
-        "Выберите тип параметров для глин:",
-        reply_markup=Keyboards.build_clay_types()
+        "Выберите тип глины:",
+        reply_markup=Keyboards.build_clay_strength_types()
     )
 
+
+# Обновленный расчет для глин
+@dp.message(Form.entering_porosity_clay)
+async def calculate_clay_params(message: types.Message, state: FSMContext):
+    try:
+        porosity = validate_porosity(message.text, SoilConstants.POROSITY_CLAY_MAX)
+        data = await state.get_data()
+        clay_type = data['clay_type']
+        fluidity_range = data['fluidity_range']
+
+        # Получаем параметры для выбранного типа глины и диапазона текучести
+        c_range, f_range = SoilData.CLAY_STRENGTH_PARAMS[clay_type][fluidity_range]
+
+        # Расчет параметров
+        c = abs(c_range[0] + ((porosity - SoilConstants.POROSITY_MID_F) /
+                              (SoilConstants.POROSITY_HIGH - SoilConstants.POROSITY_MID_F) *
+                              (c_range[1] - c_range[0])))
+
+        f = abs(f_range[0] + ((porosity - SoilConstants.POROSITY_MID_F) /
+                              (SoilConstants.POROSITY_HIGH - SoilConstants.POROSITY_MID_F) *
+                              (f_range[1] - f_range[0])))
+
+        result = (
+            f"Результаты для {clay_type} ({fluidity_range}) с пористостью {porosity}:\n\n"
+            f"c = {round(c / 1000, 3)} МПа\n"
+            f"φ = {round(f, 3)}°"
+        )
+
+        await message.answer(
+            result,
+            reply_markup=Keyboards.build_clay_strength_types()
+        )
+        await state.set_state(Form.choosing_clay_strength)
+        logger.info(f"Calculated clay params for user {message.from_user.id}")
+
+    except ValueError as e:
+        await message.answer(str(e))
+        logger.warning(f"User {message.from_user.id} entered invalid porosity: {message.text}")
 
 # Расчеты для песка
 @dp.message(Form.entering_porosity_sand)
