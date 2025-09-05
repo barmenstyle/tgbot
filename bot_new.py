@@ -431,7 +431,7 @@ async def main():
     db_conn.commit()
 
     # Внедрение зависимостей для обработчиков
-    dp.message.bind_filter(IsAdmin)
+    
     dp.message.bind_from_container(lambda: {"db_cursor": db_cursor, "db_conn": db_conn})
 
     try:
