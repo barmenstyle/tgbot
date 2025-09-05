@@ -23,7 +23,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не установлен в переменных окружения")
 
-ADMIN_IDS = [int(i) for i in os.getenv("ADMIN_IDS").split(',')]
+ADMIN_IDS_STR = os.getenv("ADMIN_IDS")
+if not ADMIN_IDS_STR:
+    ADMIN_IDS = []
+else:
+    try:
+        ADMIN_IDS = [int(i.strip()) for i in ADMIN_IDS_STR.split(',') if i.strip()]
+    except ValueError:
+        raise ValueError("ADMIN_IDS должен содержать только числа, разделенные запятыми")
+
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
@@ -37,7 +45,6 @@ class IsAdmin(Filter):
 
     async def __call__(self, message: types.Message) -> bool:
         return message.from_user.id in self.admin_ids
-
 
 is_admin_filter = IsAdmin(ADMIN_IDS)
 
@@ -164,13 +171,16 @@ def calculate_parameter(porosity: float, porosity_low: float, porosity_high: flo
     p1, p2 = param_range
     if porosity_high - porosity_low == 0:
         return p1
-
+    
     return abs(p1 + ((porosity - porosity_low) / (porosity_high - porosity_low)) * (p2 - p1))
 
 
 # Обработчики команд
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext, db_cursor: sqlite3.Cursor, db_conn: sqlite3.Connection):
+async def cmd_start(message: types.Message, state: FSMContext):
+    db_conn = message.bot.db_conn
+    db_cursor = db_conn.cursor()
+    
     await state.set_state(Form.main_menu)
     await message.answer(
         "Добро пожаловать в бот для расчета параметров грунта!\n"
@@ -292,7 +302,6 @@ async def clay_strength_type_chosen(message: types.Message, state: FSMContext):
         reply_markup=Keyboards.build_fluidity_ranges(message.text)
     )
 
-
 # Обработчик выбора показателя текучести
 @dp.message(Form.choosing_fluidity_range, F.text.in_({
     "0 ≤ I ≤ 0.25", "0.25 < I ≤ 0.5", "0.5 < I ≤ 0.75", "0.25 < I ≤ 0.75"
@@ -308,7 +317,6 @@ async def fluidity_range_chosen(message: types.Message, state: FSMContext):
         "Введите пористость грунта (от 0 до 1.05):",
         reply_markup=types.ReplyKeyboardRemove()
     )
-
 
 # Возврат к выбору типа глины
 @dp.message(Form.choosing_fluidity_range, F.text == "Назад")
@@ -399,13 +407,16 @@ async def exit_admin_panel(message: types.Message, state: FSMContext):
 
 
 @dp.message(Form.broadcast_message, is_admin_filter)
-async def send_broadcast(message: types.Message, state: FSMContext, db_cursor: sqlite3.Cursor):
+async def send_broadcast(message: types.Message, state: FSMContext):
+    db_conn = message.bot.db_conn
+    db_cursor = db_conn.cursor()
+
     db_cursor.execute("SELECT user_id FROM users")
     users = db_cursor.fetchall()
-
+    
     success_count = 0
     fail_count = 0
-
+    
     for user_id, in users:
         try:
             await bot.send_message(user_id, message.text)
@@ -413,7 +424,7 @@ async def send_broadcast(message: types.Message, state: FSMContext, db_cursor: s
         except Exception as e:
             logger.error(f"Failed to send message to user {user_id}: {e}")
             fail_count += 1
-
+    
     await message.answer(
         f"Рассылка завершена.\n"
         f"✅ Отправлено: {success_count}\n"
@@ -430,9 +441,8 @@ async def main():
     db_cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)''')
     db_conn.commit()
 
-    # Внедрение зависимостей для обработчиков
-    
-    dp.message.bind_from_container(lambda: {"db_cursor": db_cursor, "db_conn": db_conn})
+    # Внедрение зависимости: добавляем соединение с БД к объекту бота
+    bot.db_conn = db_conn
 
     try:
         logger.info("Starting bot")
@@ -444,5 +454,4 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
-
     asyncio.run(main())
