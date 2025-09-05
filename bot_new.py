@@ -1,7 +1,8 @@
 import logging
 import os
+import sqlite3
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, Filter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
@@ -17,17 +18,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация (токен теперь берется из переменных окружения)
-BOT_TOKEN = "7569043559:AAGEErj7E0DbgQbqXtquHx0TMnujlGbJmRg"
+# Конфигурация
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("Не установлен BOT_TOKEN в переменных окружения")
+    raise ValueError("BOT_TOKEN не установлен в переменных окружения")
+
+ADMIN_IDS = [int(i) for i in os.getenv("ADMIN_IDS").split(',')]
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
-# Константы вынесены в отдельный блок
+# Фильтр для админов
+class IsAdmin(Filter):
+    def __init__(self, admin_ids: list):
+        self.admin_ids = admin_ids
+
+    async def __call__(self, message: types.Message) -> bool:
+        return message.from_user.id in self.admin_ids
+
+
+is_admin_filter = IsAdmin(ADMIN_IDS)
+
+
+# Константы
 class SoilConstants:
     POROSITY_LOW = 0.45
     POROSITY_MID_C = 0.55
@@ -44,12 +59,6 @@ class SoilData:
         "Пылеватые": ((8, 6), (36, 30), (39, 28))
     }
 
-    CLAY_TYPES = {
-        "Прочностные c, ф": "CLAY_STRENGTH",
-        "Деформационные": "CLAY_DEFORMATION"
-    }
-
-    # Обновленные параметры для глин с учетом показателя текучести
     CLAY_STRENGTH_PARAMS = {
         "Суглинки": {
             "0 ≤ I ≤ 0.25": ((31, 25), (24, 23)),
@@ -68,6 +77,7 @@ class SoilData:
     }
 
     MAIN_MENU_OPTIONS = {"Пески", "Глины", "О боте"}
+    CLAY_TYPES = {"Прочностные c, φ", "Деформационные"}
 
 
 # Состояния FSM
@@ -76,12 +86,14 @@ class Form(StatesGroup):
     choosing_sand = State()
     choosing_clay = State()
     choosing_clay_strength = State()
-    choosing_fluidity_range = State()  # Исправлено название
+    choosing_fluidity_range = State()
     entering_porosity_sand = State()
     entering_porosity_clay = State()
+    admin_panel = State()
+    broadcast_message = State()
 
 
-# Клавиатуры вынесены в отдельные функции
+# Клавиатуры
 class Keyboards:
     @staticmethod
     def build_main_menu():
@@ -127,6 +139,13 @@ class Keyboards:
         builder.adjust(1)
         return builder.as_markup(resize_keyboard=True)
 
+    @staticmethod
+    def build_admin_menu():
+        builder = ReplyKeyboardBuilder()
+        builder.add(types.KeyboardButton(text="Сообщить всем"))
+        builder.add(types.KeyboardButton(text="Выход"))
+        builder.adjust(2)
+        return builder.as_markup(resize_keyboard=True)
 
 
 # Валидация ввода
@@ -136,19 +155,31 @@ def validate_porosity(value: str, max_value: float = 1.0) -> float:
         if not 0 <= pore <= max_value:
             raise ValueError(f"Пористость должна быть в диапазоне от 0 до {max_value}")
         return pore
-    except ValueError as e:
-        raise ValueError("Пожалуйста, введите корректное число") from e
+    except (ValueError, TypeError):
+        raise ValueError("Пожалуйста, введите корректное число.")
+
+
+# Универсальная функция для расчёта
+def calculate_parameter(porosity: float, porosity_low: float, porosity_high: float, param_range: tuple) -> float:
+    p1, p2 = param_range
+    if porosity_high - porosity_low == 0:
+        return p1
+
+    return abs(p1 + ((porosity - porosity_low) / (porosity_high - porosity_low)) * (p2 - p1))
 
 
 # Обработчики команд
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
+async def cmd_start(message: types.Message, state: FSMContext, db_cursor: sqlite3.Cursor, db_conn: sqlite3.Connection):
     await state.set_state(Form.main_menu)
     await message.answer(
         "Добро пожаловать в бот для расчета параметров грунта!\n"
         "Выберите тип грунта:",
         reply_markup=Keyboards.build_main_menu()
     )
+    # Сохраняем ID пользователя в БД
+    db_cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
+    db_conn.commit()
     logger.info(f"User {message.from_user.id} started the bot")
 
 
@@ -162,6 +193,16 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
         reply_markup=types.ReplyKeyboardRemove()
     )
     logger.info(f"User {message.from_user.id} canceled operation")
+
+
+# Обработчик админ-панели
+@dp.message(Command("admin"), is_admin_filter)
+async def cmd_admin(message: types.Message, state: FSMContext):
+    await state.set_state(Form.admin_panel)
+    await message.answer(
+        "Вы вошли в админ-панель. Выберите действие:",
+        reply_markup=Keyboards.build_admin_menu()
+    )
 
 
 # Главное меню
@@ -214,7 +255,7 @@ async def back_to_menu_from_sand(message: types.Message, state: FSMContext):
 
 
 # Обработка выбора глины
-@dp.message(Form.choosing_clay, F.text == "Прочностные c, ф")
+@dp.message(Form.choosing_clay, F.text == "Прочностные c, φ")
 async def clay_strength_chosen(message: types.Message, state: FSMContext):
     await state.set_state(Form.choosing_clay_strength)
     await message.answer(
@@ -240,19 +281,6 @@ async def back_to_menu_from_clay(message: types.Message, state: FSMContext):
     )
 
 
-
-
-# Новое состояние для выбора показателя текучести
-class Form(StatesGroup):
-    main_menu = State()
-    choosing_sand = State()
-    choosing_clay = State()
-    choosing_clay_strength = State()
-    choosing_fluidity_range = State()  # Новое состояние
-    entering_porosity_sand = State()
-    entering_porosity_clay = State()
-
-
 # Обработчик выбора типа глины
 @dp.message(Form.choosing_clay_strength, F.text.in_(SoilData.CLAY_STRENGTH_PARAMS))
 async def clay_strength_type_chosen(message: types.Message, state: FSMContext):
@@ -273,10 +301,7 @@ async def fluidity_range_chosen(message: types.Message, state: FSMContext):
     data = await state.get_data()
     clay_type = data['clay_type']
     fluidity_range = message.text
-
-    # Сохраняем выбранный диапазон текучести
     await state.update_data(fluidity_range=fluidity_range)
-
     await state.set_state(Form.entering_porosity_clay)
     await message.answer(
         f"Вы выбрали: {clay_type}, {fluidity_range}\n"
@@ -294,43 +319,6 @@ async def back_to_clay_types_from_fluidity(message: types.Message, state: FSMCon
         reply_markup=Keyboards.build_clay_strength_types()
     )
 
-# Обновленный расчет для глин
-@dp.message(Form.entering_porosity_clay)
-async def calculate_clay_params(message: types.Message, state: FSMContext):
-    try:
-        porosity = validate_porosity(message.text, SoilConstants.POROSITY_CLAY_MAX)
-        data = await state.get_data()
-        clay_type = data['clay_type']
-        fluidity_range = data['fluidity_range']
-
-        # Получаем параметры для выбранного типа глины и диапазона текучести
-        c_range, f_range = SoilData.CLAY_STRENGTH_PARAMS[clay_type][fluidity_range]
-
-        # Расчет параметров
-        c = abs(c_range[0] + ((porosity - SoilConstants.POROSITY_MID_F) /
-                              (SoilConstants.POROSITY_HIGH - SoilConstants.POROSITY_MID_F) *
-                              (c_range[1] - c_range[0])))
-
-        f = abs(f_range[0] + ((porosity - SoilConstants.POROSITY_MID_F) /
-                              (SoilConstants.POROSITY_HIGH - SoilConstants.POROSITY_MID_F) *
-                              (f_range[1] - f_range[0])))
-
-        result = (
-            f"Результаты для {clay_type} ({fluidity_range}) с пористостью {porosity}:\n\n"
-            f"c = {round(c / 1000, 3)} МПа\n"
-            f"φ = {round(f, 3)}°"
-        )
-
-        await message.answer(
-            result,
-            reply_markup=Keyboards.build_clay_strength_types()
-        )
-        await state.set_state(Form.choosing_clay_strength)
-        logger.info(f"Calculated clay params for user {message.from_user.id}")
-
-    except ValueError as e:
-        await message.answer(str(e))
-        logger.warning(f"User {message.from_user.id} entered invalid porosity: {message.text}")
 
 # Расчеты для песка
 @dp.message(Form.entering_porosity_sand)
@@ -342,18 +330,9 @@ async def calculate_sand_params(message: types.Message, state: FSMContext):
 
         c_range, f_range, e_range = SoilData.SAND_TYPES[sand_type]
 
-        # Расчет параметров
-        c = abs(c_range[0] + ((porosity - SoilConstants.POROSITY_LOW) /
-                              (SoilConstants.POROSITY_MID_C - SoilConstants.POROSITY_LOW) *
-                              (c_range[1] - c_range[0])))
-
-        f = abs(f_range[0] + ((porosity - SoilConstants.POROSITY_LOW) /
-                              (SoilConstants.POROSITY_MID_F - SoilConstants.POROSITY_LOW) *
-                              (f_range[1] - f_range[0])))
-
-        e = abs(e_range[0] + ((porosity - SoilConstants.POROSITY_LOW) /
-                              (SoilConstants.POROSITY_MID_C - SoilConstants.POROSITY_LOW) *
-                              (e_range[1] - e_range[0])))
+        c = calculate_parameter(porosity, SoilConstants.POROSITY_LOW, SoilConstants.POROSITY_MID_C, c_range)
+        f = calculate_parameter(porosity, SoilConstants.POROSITY_LOW, SoilConstants.POROSITY_MID_F, f_range)
+        e = calculate_parameter(porosity, SoilConstants.POROSITY_LOW, SoilConstants.POROSITY_MID_C, e_range)
 
         result = (
             f"Результаты для {sand_type} с пористостью {porosity}:\n\n"
@@ -362,15 +341,12 @@ async def calculate_sand_params(message: types.Message, state: FSMContext):
             f"E = {round(e, 3)} МПа"
         )
 
-        await message.answer(
-            result,
-            reply_markup=Keyboards.build_sand_types()
-        )
+        await message.answer(result, reply_markup=Keyboards.build_sand_types())
         await state.set_state(Form.choosing_sand)
         logger.info(f"Calculated sand params for user {message.from_user.id}")
 
     except ValueError as e:
-        await message.answer(str(e))
+        await message.answer(f"Ошибка: {e}")
         logger.warning(f"User {message.from_user.id} entered invalid porosity: {message.text}")
 
 
@@ -381,42 +357,88 @@ async def calculate_clay_params(message: types.Message, state: FSMContext):
         porosity = validate_porosity(message.text, SoilConstants.POROSITY_CLAY_MAX)
         data = await state.get_data()
         clay_type = data['clay_type']
+        fluidity_range = data['fluidity_range']
 
-        c_range, f_range = SoilData.CLAY_STRENGTH_PARAMS[clay_type]
+        c_range, f_range = SoilData.CLAY_STRENGTH_PARAMS[clay_type][fluidity_range]
 
-        # Расчет параметров
-        c = abs(c_range[0] + ((porosity - SoilConstants.POROSITY_MID_F) /
-                              (SoilConstants.POROSITY_HIGH - SoilConstants.POROSITY_MID_F) *
-                              (c_range[1] - c_range[0])))
-
-        f = abs(f_range[0] + ((porosity - SoilConstants.POROSITY_MID_F) /
-                              (SoilConstants.POROSITY_HIGH - SoilConstants.POROSITY_MID_F) *
-                              (f_range[1] - f_range[0])))
+        c = calculate_parameter(porosity, SoilConstants.POROSITY_MID_F, SoilConstants.POROSITY_HIGH, c_range)
+        f = calculate_parameter(porosity, SoilConstants.POROSITY_MID_F, SoilConstants.POROSITY_HIGH, f_range)
 
         result = (
-            f"Результаты для {clay_type} с пористостью {porosity}:\n\n"
+            f"Результаты для {clay_type} ({fluidity_range}) с пористостью {porosity}:\n\n"
             f"c = {round(c / 1000, 3)} МПа\n"
             f"φ = {round(f, 3)}°"
         )
 
-        await message.answer(
-            result,
-            reply_markup=Keyboards.build_clay_strength_types()
-        )
+        await message.answer(result, reply_markup=Keyboards.build_clay_strength_types())
         await state.set_state(Form.choosing_clay_strength)
         logger.info(f"Calculated clay params for user {message.from_user.id}")
 
     except ValueError as e:
-        await message.answer(str(e))
+        await message.answer(f"Ошибка: {e}")
         logger.warning(f"User {message.from_user.id} entered invalid porosity: {message.text}")
+
+
+# Админ-панель: обработка команд
+@dp.message(Form.admin_panel, F.text == "Сообщить всем", is_admin_filter)
+async def start_broadcast(message: types.Message, state: FSMContext):
+    await state.set_state(Form.broadcast_message)
+    await message.answer(
+        "Введите текст сообщения для рассылки:",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+
+
+@dp.message(Form.admin_panel, F.text == "Выход", is_admin_filter)
+async def exit_admin_panel(message: types.Message, state: FSMContext):
+    await state.set_state(Form.main_menu)
+    await message.answer(
+        "Вы вышли из админ-панели.",
+        reply_markup=Keyboards.build_main_menu()
+    )
+
+
+@dp.message(Form.broadcast_message, is_admin_filter)
+async def send_broadcast(message: types.Message, state: FSMContext, db_cursor: sqlite3.Cursor):
+    db_cursor.execute("SELECT user_id FROM users")
+    users = db_cursor.fetchall()
+
+    success_count = 0
+    fail_count = 0
+
+    for user_id, in users:
+        try:
+            await bot.send_message(user_id, message.text)
+            success_count += 1
+        except Exception as e:
+            logger.error(f"Failed to send message to user {user_id}: {e}")
+            fail_count += 1
+
+    await message.answer(
+        f"Рассылка завершена.\n"
+        f"✅ Отправлено: {success_count}\n"
+        f"❌ Не отправлено: {fail_count}"
+    )
+    await state.set_state(Form.admin_panel)
+    await message.answer("Выберите следующее действие:", reply_markup=Keyboards.build_admin_menu())
 
 
 # Запуск бота
 async def main():
+    db_conn = sqlite3.connect('users.db')
+    db_cursor = db_conn.cursor()
+    db_cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)''')
+    db_conn.commit()
+
+    # Внедрение зависимостей для обработчиков
+    dp.message.bind_filter(IsAdmin)
+    dp.message.bind_from_container(lambda: {"db_cursor": db_cursor, "db_conn": db_conn})
+
     try:
         logger.info("Starting bot")
         await dp.start_polling(bot)
     finally:
+        db_conn.close()
         await bot.session.close()
 
 
